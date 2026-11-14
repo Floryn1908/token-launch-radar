@@ -11,6 +11,31 @@
 // model is the entry: every implied value is priced off the snapshot's own traded protocols, so the
 // board, the dashboard and the dossier all carry the same numbers.
 //
+// How one run is ordered, and why the order matters.
+//
+// The program does its work in a fixed sequence, and each step refuses loudly before the next
+// one runs, so a bad input or a bad board is caught here, in the open, rather than surfacing
+// as a silent wrong number in the judge's hands.
+//
+// First the snapshot is read and parsed. parseSnapshot is strict: a document that is not a
+// JSON object, or that lacks an as_of date, a source, a positive floor, a protocols array or
+// a watchlist of slugs, is refused with the reason named. A protocol that lacks a slug, a
+// name or a finite TVL is refused the same way. Nothing is scored until the input is known
+// to be the shape the model expects.
+//
+// Then the board is built. buildRadar prices every rankable protocol with the comparables
+// model, sorts the scored protocols by implied value (ties broken by slug, so the board is
+// deterministic), and splits the result into the ranked board, the live-token set and the
+// comparables table the dashboard prints. boardIssue then checks the board against the gate
+// in the order the gate cares about — watchlist coverage, ranks 1..N, non-increasing implied
+// values, a board that actually ranks something, and farm steps of the right count and
+// length — and refuses the run if any of them fails.
+//
+// Then the outputs are written. board.json and data.js carry the same board, so the judge's
+// dossier and the dashboard's page can never disagree. The dashboard and the screenshots are
+// copied next, and dossier.json is written last, from exactly the files that were just put
+// in the output directory, so the dossier describes the entry as it stands.
+//
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
 
