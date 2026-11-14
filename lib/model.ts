@@ -99,7 +99,30 @@ export interface CategoryComps {
   source: 'category' | 'global';
 }
 
-/** The whole comparables table: the market median and one row per category that has peers. */
+/**
+ * The whole comparables table: the market median and one row per category that has peers.
+ *
+ * A protocol's launch value is not guessed from its name or its rank in a list. It is priced
+ * the way a market prices a new listing: by looking at what comparable listings already trade
+ * for. Every protocol that records a token, a market cap and a TVL contributes one ratio,
+ * market cap divided by TVL, and the median of those ratios is the price the market puts on
+ * a dollar of TVL in that category. A category with three or more traded peers prices itself
+ * off its own median; a thinner category is pulled toward the market-wide median, because a
+ * median drawn from one or two names is mostly noise; a category with no traded peers at all
+ * borrows the market median outright, and says so in the ratio_source the detail view shows.
+ *
+ * Two multipliers then adjust the price. Growth multiplies by half the protocol's 7-day
+ * change, clamped to -60%..+120%, so a protocol that grew 20% in a week prices 10% higher
+ * than one that stood still and a protocol that fell 60% prices 30% lower, but a single
+ * wild week cannot double or halve the number. Maturity adds up to 40% for a protocol that
+ * has run three years with no token, on the reasoning that a protocol that survived that
+ * long without launching is likelier to launch at all, while a protocol younger than a year
+ * gets only the floor. A protocol whose listing date is unknown is given a year, the middle
+ * of the range, rather than the floor or the ceiling.
+ *
+ * The comparables are recomputed from the snapshot on every run, so the board follows the
+ * market instead of freezing a number from the day it was built.
+ */
 export interface Comparables {
   global_median: number;
   n: number;
@@ -594,7 +617,13 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   return { board, radar };
 }
 
-/** The snapshot out of a file's text, refused unless it is the shape the model scores. */
+/**
+ * The snapshot out of a file's text. The shape is strict: the document must be a JSON object
+ * with an as_of date, a source string, a positive whole floor, a protocols array and a
+ * watchlist of slugs; every protocol must carry a slug, a name and a finite TVL. Anything
+ * else is refused with a SnapshotError naming the problem, so a malformed input fails loudly
+ * instead of silently scoring the wrong protocols.
+ */
 export function parseSnapshot(text: string): Snapshot {
   let raw: unknown;
   try {
@@ -602,57 +631,96 @@ export function parseSnapshot(text: string): Snapshot {
   } catch {
     throw new SnapshotError('snapshot.json is not JSON');
   }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new SnapshotError('snapshot.json is not a JSON object');
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new SnapshotError('snapshot.json is not a JSON object');
+  }
   const o = raw as Record<string, unknown>;
-  if (typeof o.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.as_of)) throw new SnapshotError('snapshot.json has no as_of date');
-  if (typeof o.source !== 'string') throw new SnapshotError('snapshot.json has no source');
-  if (typeof o.floor_usd !== 'number' || !Number.isSafeInteger(o.floor_usd) || o.floor_usd <= 0) throw new SnapshotError('snapshot.json has no floor_usd');
-  if (!Array.isArray(o.protocols)) throw new SnapshotError('snapshot.json has no protocols array');
-  if (!Array.isArray(o.watchlist) || o.watchlist.some((s) => typeof s !== 'string')) throw new SnapshotError('snapshot.json has no watchlist of slugs');
+  if (typeof o.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.as_of)) {
+    throw new SnapshotError('snapshot.json has no as_of date');
+  }
+  if (typeof o.source !== 'string') {
+    throw new SnapshotError('snapshot.json has no source');
+  }
+  if (typeof o.floor_usd !== 'number' || !Number.isSafeInteger(o.floor_usd) || o.floor_usd <= 0) {
+    throw new SnapshotError('snapshot.json has no floor_usd');
+  }
+  if (!Array.isArray(o.protocols)) {
+    throw new SnapshotError('snapshot.json has no protocols array');
+  }
+  if (!Array.isArray(o.watchlist) || o.watchlist.some((s) => typeof s !== 'string')) {
+    throw new SnapshotError('snapshot.json has no watchlist of slugs');
+  }
   const protocols = o.protocols.map((v, i) => {
-    if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new SnapshotError(`snapshot.json's protocol ${i} is not an object`);
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+      throw new SnapshotError(`snapshot.json's protocol ${i} is not an object`);
+    }
     const p = v as Record<string, unknown>;
-    if (typeof p.slug !== 'string' || typeof p.name !== 'string' || typeof p.tvl_usd !== 'number' || !Number.isFinite(p.tvl_usd)) {
+    const bad = typeof p.slug !== 'string' || typeof p.name !== 'string' || typeof p.tvl_usd !== 'number' || !Number.isFinite(p.tvl_usd);
+    if (bad) {
       throw new SnapshotError(`snapshot.json's protocol ${i} lacks a slug, a name or a TVL`);
     }
+    const numOrNull = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+    const strOrNull = (x: unknown): string | null => (typeof x === 'string' ? x : null);
     return {
-      slug: p.slug,
-      name: p.name,
-      category: typeof p.category === 'string' ? p.category : null,
+      slug: p.slug as string,
+      name: p.name as string,
+      category: strOrNull(p.category),
       chains: Array.isArray(p.chains) ? p.chains.filter((c): c is string => typeof c === 'string') : [],
-      tvl_usd: p.tvl_usd,
-      change_7d: typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : null,
-      mcap_usd: typeof p.mcap_usd === 'number' && Number.isFinite(p.mcap_usd) ? p.mcap_usd : null,
-      listed_at: typeof p.listed_at === 'string' ? p.listed_at : null,
-      gecko_id: typeof p.gecko_id === 'string' ? p.gecko_id : null,
-      symbol: typeof p.symbol === 'string' ? p.symbol : null,
+      tvl_usd: p.tvl_usd as number,
+      change_7d: numOrNull(p.change_7d),
+      mcap_usd: numOrNull(p.mcap_usd),
+      listed_at: strOrNull(p.listed_at),
+      gecko_id: strOrNull(p.gecko_id),
+      symbol: strOrNull(p.symbol),
     };
   });
   return {
-    as_of: o.as_of,
-    source: o.source,
-    floor_usd: o.floor_usd,
+    as_of: o.as_of as string,
+    source: o.source as string,
+    floor_usd: o.floor_usd as number,
     protocols,
     watchlist: o.watchlist as string[],
   };
 }
 
-/** Why a board is not one the gate will take, or null: coverage, ranks, order, one shared implied value, and farm steps. */
+/**
+ * Why a board is not one the gate will take, or null. The checks run in the order the gate
+ * cares about: the watchlist must be fully covered first, then the ranks must be exactly
+ * 1..N, then the implied values must not rise as the rank ascends, then the board must
+ * actually rank something (not one shared value), and finally every row must carry a valid
+ * implied value and a farm plan of 3 to 12 steps of 20 to 600 characters each.
+ */
 export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null {
   const slugs = new Set(board.map((r) => r.slug));
   const missing = snapshot.watchlist.filter((s) => !slugs.has(s));
-  if (missing.length > 0) return `the board misses ${missing.length} watchlist slug${missing.length === 1 ? '' : 's'}: ${missing.slice(0, 5).join(', ')}`;
+  if (missing.length > 0) {
+    return `the board misses ${missing.length} watchlist slug${missing.length === 1 ? '' : 's'}: ${missing.slice(0, 5).join(', ')}`;
+  }
   const ranks = board.map((r) => r.rank).sort((a, b) => a - b);
-  for (let i = 0; i < ranks.length; i++) if (ranks[i] !== i + 1) return `rank ${i + 1} is ${ranks[i]}`;
-  for (let i = 1; i < board.length; i++) if (board[i]!.implied_value_usd > board[i - 1]!.implied_value_usd) return `row ${i + 1} outranks row ${i} on implied value`;
+  for (let i = 0; i < ranks.length; i++) {
+    if (ranks[i] !== i + 1) return `rank ${i + 1} is ${ranks[i]}`;
+  }
+  for (let i = 1; i < board.length; i++) {
+    if (board[i]!.implied_value_usd > board[i - 1]!.implied_value_usd) {
+      return `row ${i + 1} outranks row ${i} on implied value`;
+    }
+  }
   if (board.length >= 2 && board[0]!.implied_value_usd === board[board.length - 1]!.implied_value_usd) {
     return `all ${board.length} rows share the same implied value $${board[0]!.implied_value_usd}: a board that ranks nothing by value is not a ranking`;
   }
   for (const r of board) {
+    if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0) {
+      return `${r.slug} has implied value ${r.implied_value_usd}`;
+    }
     const steps = r.farm_steps;
-    if (steps.length < 3 || steps.length > 12) return `${r.slug} has ${steps.length} farm steps`;
-    for (const s of steps) if (s.length < 20 || s.length > 600) return `${r.slug} has a farm step of ${s.length} characters`;
-    if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0) return `${r.slug} has implied value ${r.implied_value_usd}`;
+    if (steps.length < 3 || steps.length > 12) {
+      return `${r.slug} has ${steps.length} farm steps`;
+    }
+    for (const s of steps) {
+      if (s.length < 20 || s.length > 600) {
+        return `${r.slug} has a farm step of ${s.length} characters`;
+      }
+    }
   }
   return null;
 }
