@@ -2,8 +2,8 @@
 // renders the ranked board, a filterable table, a per-protocol detail drawer with the model's own
 // inputs and the protocol's farm plan. No network: every byte it shows is in data.js.
 //
-// The value model is comparables-priced: each row carries the ratio it was priced at (its
-// category's shrunk median market-cap-to-TVL, or the market median when the category is thin),
+// The value model is a fitted size curve: each row carries the ratio the curve gives its TVL
+// (log mcap = a + b x log TVL over the snapshot's cleaned traded protocols, tested blind),
 // and the page recomputes the row from those figures and checks the number board.json carries.
 (function () {
   'use strict';
@@ -352,15 +352,18 @@
       );
     });
     var thin = comps.categories.filter(function (c) { return c.source === 'global'; }).length;
+    var curve = comps.curve;
+    var loo = comps.loo;
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is priced off the snapshot\u2019s own traded protocols. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x ratio(category) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
+        'implied = round( tvl_usd x ratio(tvl_usd) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
       ),
-      el('p', { class: 'sub', text: 'ratio(category) is the median market-cap-to-TVL of the ' + comps.n + ' traded protocols in that category, shrunk toward the market median ' + fmtRatio(comps.global_median) + ' with weight n / (n + ' + m.shrink_k + '). A category with fewer than ' + m.min_peers + ' traded peers uses the market median outright.' }),
+      el('p', { class: 'sub', text: 'ratio(tvl_usd) comes from one fitted size curve: log(mcap) = ' + curve.intercept.toFixed(2) + ' + ' + curve.slope.toFixed(2) + ' x log(tvl), fitted on ' + curve.kept + ' traded protocols after dropping ' + curve.dropped + ' outlier' + (curve.dropped === 1 ? '' : 's') + ' (Tukey 1.5 x IQR on log mcap/TVL). A dollar of TVL is worth less at a larger protocol: the curve gives ' + fmtRatio(Math.exp(curve.intercept) * Math.pow(1e8, curve.slope - 1)) + ' at $100M of TVL and ' + fmtRatio(Math.exp(curve.intercept) * Math.pow(1e10, curve.slope - 1)) + ' at $10B.' }),
+      el('p', { class: 'sub', text: 'Tested blind: leave one traded protocol out, fit the curve without it, and predict its market cap from its TVL. Over all ' + loo.n + ' traded protocols the curve\u2019s median error is ' + loo.curve_median.toFixed(2) + ' log points, against ' + loo.median_median.toFixed(2) + ' for the category-median model it replaces, and the curve wins on ' + loo.curve_wins + ' of ' + loo.n + '. The choice of the curve is measured, not asserted.' }),
       el('table', { class: 'comps' },
-        el('caption', { class: 'sub', text: 'Comparables: the traded protocols each category is priced off. Thin categories use the market median and are named, not hidden.' }),
+        el('caption', { class: 'sub', text: 'Comparables by category, for reference: the board prices off the fitted curve above, not these medians. Each row shows what the old median model would have used.' }),
         el('thead', null, el('tr', null,
           el('th', { scope: 'col', text: 'Category' }),
           el('th', { scope: 'col', text: 'Peers' }),
@@ -370,7 +373,7 @@
         )),
         el('tbody', null, compRows)
       ),
-      el('p', { class: 'sub', text: thin + ' categories have too few traded peers and use the market median ' + fmtRatio(comps.global_median) + ' \u2014 including Risk Curators and Onchain Capital Allocator, the board\u2019s two largest categories. That is the model knowing its limits, not hiding them.' }),
+      el('p', { class: 'sub', text: 'The curve prices every row, thin category or not: no row falls back to the market median ' + fmtRatio(comps.global_median) + ' because its category has too few peers. The ' + thin + ' thin categories above are shown for reference, not used for pricing.' }),
       el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The live-token protocols are set aside with their market caps shown.' })
     );
   }
@@ -385,7 +388,10 @@
     writeHash();
     dialog.textContent = '';
     var steps = farmSteps(row);
-    var ratioNote = row.ratio_source === 'category'
+    var curve = DATA.comparables.curve;
+    var ratioNote = row.ratio_source === 'curve'
+      ? 'Priced off the fitted size curve (log mcap = ' + curve.intercept.toFixed(2) + ' + ' + curve.slope.toFixed(2) + ' x log TVL, fitted on ' + curve.kept + ' cleaned traded protocols): at this TVL the curve gives ' + fmtRatio(row.ratio_used) + '. The category median ' + fmtRatio(row.category_median) + ' is shown for reference, not used for pricing.'
+      : row.ratio_source === 'category'
       ? 'Priced off ' + row.category_peers + ' traded ' + (row.category || 'category') + ' protocols (median ' + fmtRatio(row.category_median) + ', weight ' + row.shrink_weight.toFixed(2) + ' toward the market median).'
       : 'Priced off the market median ' + fmtRatio(row.global_median) + ': ' + (row.category || 'this category') + ' has ' + row.category_peers + ' traded peer' + (row.category_peers === 1 ? '' : 's') + ', too few to price on its own.';
     dialog.appendChild(el('div', { class: 'detail-head' },
