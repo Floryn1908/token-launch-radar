@@ -1,7 +1,21 @@
-# Token Launch Radar
+# token-launch-radar
+
+[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/Floryn1908/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/Floryn1908/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
 A token launch radar for the make.fun bounty `token-radar-01`: 198 pre-token protocols,
 ranked by implied launch value, with a farm plan for each.
+
+## Run it
+
+```sh
+mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json>
+```
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=x054zwkw&utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards</sub>
 
 ## The model
 
@@ -23,12 +37,6 @@ points, against 1.63 for the shrunk category median it replaces, winning on 63 o
 Category medians are still computed and shown in the dashboard for reference.
 
 No protocol name is special-cased. The comparables table is printed in the dashboard.
-
-## Run it
-
-```
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json>
-```
 
 `main.ts` (Node 22, standard library only) reads the sealed snapshot, writes
 `board.json` and `data.js`, copies `dashboard/` and `screenshots/`, and writes
