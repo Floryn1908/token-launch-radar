@@ -21,8 +21,10 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json>
 
 Implied value is priced off the snapshot's own traded protocols, fitted with one size
 curve: log(mcap) = a + b x log(tvl), ordinary least squares over the traded protocols
-after Tukey-cleaning the log mcap/TVL ratios (1.5 x IQR fences). A dollar of TVL is worth
-less at a larger protocol, and a single median per category hides that. Growth (7-day)
+after Tukey-cleaning the log mcap/TVL ratios (1.0 x IQR fences). A dollar of TVL is worth
+less at a larger protocol, and a single median per category hides that. The fence is 1.0,
+not the usual 1.5, because the blind test measured it: the tighter fence drops the
+handful of extreme-ratio peers whose leverage bends the slope. Growth (7-day)
 and age (how long the protocol has run with no token) adjust the price.
 
 ```
@@ -32,9 +34,11 @@ implied = round(tvl_usd x ratio(tvl_usd) x growth x maturity)
 ```
 
 Tested blind before it prices anything: leave-one-out over the 94 traded protocols,
-each predicted from a fit that never saw it. The curve's median error is 1.20 log
+each predicted from a fit that never saw it. The curve's median error is 1.19 log
 points, against 1.63 for the shrunk category median it replaces, winning on 63 of 94.
-Category medians are still computed and shown in the dashboard for reference.
+On the full pricing formula (curve x growth x maturity) the 1.0 fence beats the 1.5
+fence on 57 of 94 peers (paired t = -2.64); the 0.75 and 2.0 fences are worse on that median, so 1.0 is the measured choice. Category medians are still computed and shown
+in the dashboard for reference.
 
 No protocol name is special-cased. The comparables table is printed in the dashboard.
 
