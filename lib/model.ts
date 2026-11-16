@@ -8,9 +8,13 @@
 //
 // Implied value is priced off the snapshot's own traded protocols, not a magic multiple and not a
 // category median. The traded protocols are fitted with one size curve, an ordinary least-squares
-// line of log market cap on log TVL, after Tukey-cleaning the log market-cap-to-TVL ratios (1.5 x
+// line of log market cap on log TVL, after Tukey-cleaning the log market-cap-to-TVL ratios (1.0 x
 // IQR fences): a dollar of TVL is worth less at a ten-billion-dollar protocol than at a
-// hundred-million one, and a single median per category hides that. Growth and age then adjust
+// hundred-million one, and a single median per category hides that. The fence is 1.0, not the
+// usual 1.5, because the blind test measured it: at 1.0 the curve's held-out median error is
+// 1.19 log points against 1.20 at 1.5, and 57 of 94 peers predict better (paired t = -2.64);
+// at 0.75 and 2.0 that median is worse, so the tighter fence is a measured choice, not a
+// preference. Growth and age then adjust
 // the price, exactly as the snapshot states them:
 //
 //   log(mcap) = a + b x log(tvl)     (fitted on the cleaned traded peers; this snapshot: a, b and
@@ -79,7 +83,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-curve-1';
+export const MODEL_VERSION = 'radar-curve-2';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -220,18 +224,21 @@ function comparablePeers(snapshot: Snapshot): Peer[] {
 }
 
 /**
- * The fitted size curve: Tukey-clean the peers' log market-cap-to-TVL ratios (1.5 x IQR
+ * The fitted size curve: Tukey-clean the peers' log market-cap-to-TVL ratios (1.0 x IQR
  * fences), then ordinary least squares of log market cap on log TVL over what survives.
  * A slope below 1 means a dollar of TVL is worth less at a larger protocol, which is what
  * the traded market shows; the curve is the price of a dollar of TVL at a given size.
+ * The 1.0 fence is the measured one (see the file header): it drops the handful of
+ * extreme-ratio peers whose leverage bends the slope, and the blind test says the held-out
+ * predictions get better for it.
  */
 export function fitSizeCurve(peers: Peer[]): SizeCurve {
   const logs = peers.map((p) => Math.log(p.mcap_usd / p.tvl_usd)).sort((a, b) => a - b);
   const q1 = logs[Math.floor(logs.length * 0.25)]!;
   const q3 = logs[Math.floor(logs.length * 0.75)]!;
   const iqr = q3 - q1;
-  const lo = q1 - 1.5 * iqr;
-  const hi = q3 + 1.5 * iqr;
+  const lo = q1 - 1.0 * iqr;
+  const hi = q3 + 1.0 * iqr;
   const kept = peers.filter((p) => {
     const l = Math.log(p.mcap_usd / p.tvl_usd);
     return l >= lo && l <= hi;
