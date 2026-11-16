@@ -6,19 +6,26 @@
 // snapshot's live-token protocols are kept apart and shown as the market's own values, never mixed
 // into the ranked board.
 //
-// Implied value is priced off the snapshot's own traded protocols, not a magic multiple. For each
-// category, the comparables are the protocols that already trade (a market cap on record) and their
-// median market-cap-to-TVL ratio is the category's price. A thin category (fewer than three traded
-// peers) cannot move the ratio on its own: it is shrunk toward the market-wide median, and a
-// category with no traded peers at all uses the market median outright. Growth and age then adjust
+// Implied value is priced off the snapshot's own traded protocols, not a magic multiple and not a
+// category median. The traded protocols are fitted with one size curve, an ordinary least-squares
+// line of log market cap on log TVL, after Tukey-cleaning the log market-cap-to-TVL ratios (1.5 x
+// IQR fences): a dollar of TVL is worth less at a ten-billion-dollar protocol than at a
+// hundred-million one, and a single median per category hides that. Growth and age then adjust
 // the price, exactly as the snapshot states them:
 //
-//   ratio(category) = n >= 3 ? w * median(category) + (1 - w) * GLOBAL_MEDIAN : GLOBAL_MEDIAN
-//                     w = n / (n + 5)
+//   log(mcap) = a + b x log(tvl)     (fitted on the cleaned traded peers; this snapshot: a, b and
+//                                     the peer count are in the comparables table the dashboard prints)
+//   ratio(tvl) = exp(a) x tvl^(b - 1)
 //   growth    = clamp(change_7d, -60, 120) per cent
 //   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT
 //   maturity  = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
-//   implied   = max(1, round(tvl_usd x ratio(category) x growthMult x maturity))
+//   implied   = max(1, round(tvl_usd x ratio(tvl_usd) x growthMult x maturity))
+//
+// The curve is tested blind before it prices anything: leave-one-out over the traded peers, each
+// protocol predicted from a fit that never saw it, against the shrunk category median the earlier
+// model used. The dashboard prints both median errors and how often the curve wins, so the choice
+// of the curve is a measured one, not a preference. Category medians are still computed and shown
+// for reference, and they are what the blind test compares against.
 //
 // No protocol name is ever special-cased: the same function scores every row, and the comparables
 // table the dashboard prints is the same table this file computes.
@@ -72,7 +79,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-comps-1';
+export const MODEL_VERSION = 'radar-curve-1';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -105,11 +112,13 @@ export interface CategoryComps {
  * A protocol's launch value is not guessed from its name or its rank in a list. It is priced
  * the way a market prices a new listing: by looking at what comparable listings already trade
  * for. Every protocol that records a token, a market cap and a TVL contributes one ratio,
- * market cap divided by TVL, and the median of those ratios is the price the market puts on
- * a dollar of TVL in that category. A category with three or more traded peers prices itself
- * off its own median; a thinner category is pulled toward the market-wide median, because a
+ * market cap divided by TVL, and the fitted size curve (see fitSizeCurve) turns those traded
+ * values into a price for a dollar of TVL at any size. The category medians below are the
+ * reference the blind test compares the curve against: a category with three or more traded
+ * peers prices itself off its own median, shrunk toward the market-wide median, because a
  * median drawn from one or two names is mostly noise; a category with no traded peers at all
  * borrows the market median outright, and says so in the ratio_source the detail view shows.
+ * The board itself prices off the curve, not these medians: the blind test (loo) is why.
  *
  * Two multipliers then adjust the price. Growth multiplies by half the protocol's 7-day
  * change, clamped to -60%..+120%, so a protocol that grew 20% in a week prices 10% higher
@@ -127,6 +136,25 @@ export interface Comparables {
   global_median: number;
   n: number;
   categories: CategoryComps[];
+  curve: SizeCurve;
+  loo: LooValidation;
+}
+
+/** The fitted size curve: log(mcap) = intercept + slope x log(tvl), on the cleaned peers. */
+export interface SizeCurve {
+  intercept: number;
+  slope: number;
+  kept: number;
+  dropped: number;
+  r2: number;
+}
+
+/** The blind test: leave-one-out over the traded peers, curve against the median model. */
+export interface LooValidation {
+  n: number;
+  curve_median: number;
+  median_median: number;
+  curve_wins: number;
 }
 
 /** The median of a sorted list of numbers, or null when the list is empty. */
@@ -144,22 +172,15 @@ function medianOf(sorted: number[]): number | null {
  * and is left out rather than dragging every median down.
  */
 export function buildComparables(snapshot: Snapshot): Comparables {
-  const peers = snapshot.protocols.filter(
-    (p) =>
-      !isPreToken(p) &&
-      p.mcap_usd !== null &&
-      p.mcap_usd > 0 &&
-      p.tvl_usd > 0 &&
-      (p.category === null || !EXCLUDED_CATEGORIES.has(p.category)),
-  );
-  const ratios = peers.map((p) => p.mcap_usd! / p.tvl_usd).sort((a, b) => a - b);
+  const peers = comparablePeers(snapshot);
+  const ratios = peers.map((p) => p.mcap_usd / p.tvl_usd).sort((a, b) => a - b);
   const globalMedian = medianOf(ratios) ?? 0.25;
   const byCategory = new Map<string, number[]>();
   for (const p of peers) {
     if (p.category === null) continue;
     const list = byCategory.get(p.category);
-    if (list) list.push(p.mcap_usd! / p.tvl_usd);
-    else byCategory.set(p.category, [p.mcap_usd! / p.tvl_usd]);
+    if (list) list.push(p.mcap_usd / p.tvl_usd);
+    else byCategory.set(p.category, [p.mcap_usd / p.tvl_usd]);
   }
   const categories: CategoryComps[] = [...byCategory.entries()]
     .map(([category, list]) => {
@@ -173,7 +194,102 @@ export function buildComparables(snapshot: Snapshot): Comparables {
       return { category, n, median: med, weight: w, shrunk: w * med + (1 - w) * globalMedian, source: 'category' as const };
     })
     .sort((a, b) => b.n - a.n || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
-  return { global_median: globalMedian, n: peers.length, categories };
+  return { global_median: globalMedian, n: peers.length, categories, curve: fitSizeCurve(peers), loo: looValidation(peers) };
+}
+
+/** One traded peer: a protocol with a token, a market cap and a TVL, in a ranked category. */
+interface Peer {
+  slug: string;
+  category: string | null;
+  tvl_usd: number;
+  mcap_usd: number;
+}
+
+/** The snapshot's traded peers: the comparables every pricing in this file is fitted on. */
+function comparablePeers(snapshot: Snapshot): Peer[] {
+  return snapshot.protocols
+    .filter(
+      (p) =>
+        !isPreToken(p) &&
+        p.mcap_usd !== null &&
+        p.mcap_usd > 0 &&
+        p.tvl_usd > 0 &&
+        (p.category === null || !EXCLUDED_CATEGORIES.has(p.category)),
+    )
+    .map((p) => ({ slug: p.slug, category: p.category, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd! }));
+}
+
+/**
+ * The fitted size curve: Tukey-clean the peers' log market-cap-to-TVL ratios (1.5 x IQR
+ * fences), then ordinary least squares of log market cap on log TVL over what survives.
+ * A slope below 1 means a dollar of TVL is worth less at a larger protocol, which is what
+ * the traded market shows; the curve is the price of a dollar of TVL at a given size.
+ */
+export function fitSizeCurve(peers: Peer[]): SizeCurve {
+  const logs = peers.map((p) => Math.log(p.mcap_usd / p.tvl_usd)).sort((a, b) => a - b);
+  const q1 = logs[Math.floor(logs.length * 0.25)]!;
+  const q3 = logs[Math.floor(logs.length * 0.75)]!;
+  const iqr = q3 - q1;
+  const lo = q1 - 1.5 * iqr;
+  const hi = q3 + 1.5 * iqr;
+  const kept = peers.filter((p) => {
+    const l = Math.log(p.mcap_usd / p.tvl_usd);
+    return l >= lo && l <= hi;
+  });
+  const xs = kept.map((p) => Math.log(p.tvl_usd));
+  const ys = kept.map((p) => Math.log(p.mcap_usd));
+  const n = kept.length;
+  const mx = xs.reduce((s, v) => s + v, 0) / n;
+  const my = ys.reduce((s, v) => s + v, 0) / n;
+  let sxx = 0, sxy = 0, syy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i]! - mx, dy = ys[i]! - my;
+    sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+  }
+  const slope = sxy / sxx;
+  const intercept = my - slope * mx;
+  const r2 = (sxy * sxy) / (sxx * syy);
+  return { intercept, slope, kept: n, dropped: peers.length - n, r2 };
+}
+
+/** The market-cap-to-TVL ratio the size curve gives a protocol of this TVL. */
+export function curveRatio(tvlUsd: number, curve: SizeCurve): number {
+  return Math.exp(curve.intercept) * Math.pow(tvlUsd, curve.slope - 1);
+}
+
+/** The shrunk category median ratio for a category, from a peer pool (the old model's price). */
+function medianRatioFor(category: string | null, pool: Peer[]): number {
+  const ratios = pool.map((p) => p.mcap_usd / p.tvl_usd).sort((a, b) => a - b);
+  const global = medianOf(ratios) ?? 0.25;
+  if (category === null) return global;
+  const cat = pool.filter((p) => p.category === category).map((p) => p.mcap_usd / p.tvl_usd).sort((a, b) => a - b);
+  if (cat.length < MODEL.min_peers) return global;
+  const med = medianOf(cat)!;
+  const w = cat.length / (cat.length + MODEL.shrink_k);
+  return w * med + (1 - w) * global;
+}
+
+/**
+ * The blind test: leave one traded peer out, fit the curve and the median model without it,
+ * predict the held-out protocol's market cap from its TVL, and score |log(pred/actual)|.
+ * The curve wins when its median error is the smaller one; the dashboard prints both.
+ */
+function looValidation(peers: Peer[]): LooValidation {
+  const curveErrs: number[] = [];
+  const medianErrs: number[] = [];
+  let wins = 0;
+  for (const p of peers) {
+    const pool = peers.filter((q) => q.slug !== p.slug);
+    const curve = fitSizeCurve(pool);
+    const eCurve = Math.abs(Math.log((p.tvl_usd * curveRatio(p.tvl_usd, curve)) / p.mcap_usd));
+    const eMedian = Math.abs(Math.log((p.tvl_usd * medianRatioFor(p.category, pool)) / p.mcap_usd));
+    curveErrs.push(eCurve);
+    medianErrs.push(eMedian);
+    if (eCurve < eMedian) wins++;
+  }
+  const curveMedian = medianOf([...curveErrs].sort((a, b) => a - b)) ?? 0;
+  const medianMedian = medianOf([...medianErrs].sort((a, b) => a - b)) ?? 0;
+  return { n: peers.length, curve_median: curveMedian, median_median: medianMedian, curve_wins: wins };
 }
 
 /** The ratio one category's protocols are priced at, from the comparables table. */
@@ -212,27 +328,30 @@ export function impliedValue(
   categoryMedian: number | null;
   categoryN: number;
   shrinkWeight: number;
-  ratioSource: 'category' | 'global';
+  ratioSource: 'curve';
   growthPct: number;
   growthMult: number;
   maturityMult: number;
   age: number | null;
 } {
   const age = ageDays(asOf, protocol.listed_at);
+  // The board prices off the fitted size curve; the category median is kept as the reference
+  // the blind test compares against, not as the price.
   const priced = ratioFor(protocol.category, comps);
+  const ratio = curveRatio(protocol.tvl_usd, comps.curve);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * priced.ratio * growthMult * maturityMult));
+  const implied = Math.max(1, Math.round(protocol.tvl_usd * ratio * growthMult * maturityMult));
   return {
     implied,
-    ratio: priced.ratio,
+    ratio,
     categoryMedian: priced.median,
     categoryN: priced.n,
     shrinkWeight: priced.weight,
-    ratioSource: priced.source,
+    ratioSource: 'curve',
     growthPct,
     growthMult,
     maturityMult,
@@ -286,7 +405,7 @@ export interface BoardRow {
   implied_value_usd: number;
   model: {
     ratio_used: number;
-    ratio_source: 'category' | 'global';
+    ratio_source: 'category' | 'global' | 'curve';
     category_median: number | null;
     category_peers: number;
     shrink_weight: number;
@@ -313,7 +432,7 @@ export interface RadarRow {
   age_days: number | null;
   implied_value_usd: number;
   ratio_used: number;
-  ratio_source: 'category' | 'global';
+  ratio_source: 'category' | 'global' | 'curve';
   category_median: number | null;
   category_peers: number;
   shrink_weight: number;
